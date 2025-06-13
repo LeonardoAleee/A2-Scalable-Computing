@@ -1,0 +1,1 @@
+# Esse script foi usado para gerar dados históricos do passado e colocar no RDS
