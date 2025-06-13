@@ -1,6 +1,7 @@
 import json
 import time
 import random
+from datetime import datetime
 from faker import Faker
 from kafka import KafkaProducer
 import logging
@@ -55,7 +56,6 @@ def generate_data(producer):
 
     while True:
         try:
-            # Gera dados de cliente e score para o mesmo CPF
             cpf = fake.cpf()
             client_id = str(fake.uuid4())
             
@@ -72,29 +72,26 @@ def generate_data(producer):
                 'Score': random.randint(0, 1000),
                 'RendaMensal': round(random.uniform(1200, 15000), 2),
                 'LimiteCredito': round(random.uniform(500, 50000), 2),
-                'AtualizadoEm': fake.iso8601()
+                'AtualizadoEm': datetime.utcnow().isoformat()
             }
 
-            # Envia dados de cliente e score
             producer.send(client_topic, key=client_id, value=client_data)
             producer.send(score_topic, key=cpf, value=score_data)
-            logging.info(f"Enviado Cliente: {client_id} e Score para CPF: {cpf}")
 
             # Gera um número aleatório de transações para o cliente
             for _ in range(random.randint(1, 5)):
                 transaction_id = str(fake.uuid4())
                 transaction_data = {
                     'ID': transaction_id,
-                    'ClienteID': client_id, # Chave estrangeira para o cliente
-                    'Data': fake.iso8601(),
+                    'ClienteID': client_id,
+                    'Data': datetime.utcnow().isoformat(),
                     'Valor': round(random.uniform(10, 2000), 2),
                     'Moeda': random.choice(['BRL', 'USD', 'EUR'])
                 }
                 producer.send(transaction_topic, key=transaction_id, value=transaction_data)
-                logging.info(f"Enviada Transação: {transaction_id} para Cliente: {client_id}")
 
             producer.flush()
-            logging.info("--- Lote de dados enviado ---")
+            logging.info(f"--- Lote de dados com {_+1} transações enviado para o Kafka ---")
             time.sleep(random.uniform(0.5, 2.0))
 
         except Exception as e:

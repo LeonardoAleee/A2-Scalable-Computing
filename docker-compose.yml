@@ -26,3 +26,26 @@ services:
     build: ./generator
     depends_on:
       - kafka 
+
+  pyspark_consumer:
+    build: ./pyspark_consumer
+    depends_on:
+      - kafka
+      - redis
+    volumes:
+      - ./pyspark_consumer:/app
+
+  dashboard:
+    build: ./dashboard
+    ports:
+      - "8501:8501"
+    depends_on:
+      - redis
+    volumes:
+      - ./dashboard:/app
+
+  redis:
+    image: "redis:alpine"
+    container_name: redis
+    ports:
+      - "6379:6379" 
