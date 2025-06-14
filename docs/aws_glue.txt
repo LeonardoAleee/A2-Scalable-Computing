@@ -1,0 +1,1 @@
+# Trocar o ip privado da instancia EC2 (kafka) no job parameters
