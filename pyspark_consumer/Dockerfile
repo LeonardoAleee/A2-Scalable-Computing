@@ -25,4 +25,4 @@ COPY . .
 
 # Comando para rodar a aplicação.
 # O Spark é executado como o usuário padrão do contêiner a partir daqui.
-CMD ["spark-submit", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0", "consumer.py"] 
+CMD ["spark-submit", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.6.0", "consumer.py"] 

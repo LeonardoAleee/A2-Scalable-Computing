@@ -1,0 +1,62 @@
+SEMPRE QUE LIGAR O EC2 O KAFKA É AUTOMATICAMENTE INICIADO
+
+# ==============================================================================
+#           Configuração dos Serviços systemd para Kafka na EC2
+# ==============================================================================
+#
+# Este arquivo contém as configurações para registrar o ZooKeeper e o Kafka
+# como serviços que iniciam automaticamente com o sistema operacional Linux.
+#
+# Instruções:
+# 1. Crie o primeiro arquivo em: /etc/systemd/system/zookeeper.service
+# 2. Crie o segundo arquivo em: /etc/systemd/system/kafka.service
+# 3. Rode `sudo systemctl daemon-reload`
+# 4. Rode `sudo systemctl enable zookeeper.service kafka.service`
+# 5. Rode `sudo systemctl start zookeeper.service kafka.service`
+#
+# ==============================================================================
+
+
+# ------------------------------------------------------------------------------
+# Arquivo 1: /etc/systemd/system/zookeeper.service
+# ------------------------------------------------------------------------------
+#
+# Responsável por iniciar e gerenciar o processo do Apache ZooKeeper.
+# Ele é configurado para ser iniciado assim que a rede estiver disponível.
+
+[Unit]
+Description=Apache Zookeeper server
+After=network.target
+
+[Service]
+Type=simple
+User=ec2-user
+ExecStart=/home/ec2-user/kafka_2.12-3.7.0/bin/zookeeper-server-start.sh /home/ec2-user/kafka_2.12-3.7.0/config/zookeeper.properties
+ExecStop=/home/ec2-user/kafka_2.12-3.7.0/bin/zookeeper-server-stop.sh
+Restart=on-abnormal
+
+[Install]
+WantedBy=multi-user.target
+
+
+# ------------------------------------------------------------------------------
+# Arquivo 2: /etc/systemd/system/kafka.service
+# ------------------------------------------------------------------------------
+#
+# Responsável por iniciar e gerenciar o processo do Broker Apache Kafka.
+# A diretiva 'Requires' garante que o ZooKeeper será iniciado primeiro.
+
+[Unit]
+Description=Apache Kafka Server
+Requires=zookeeper.service
+After=zookeeper.service
+
+[Service]
+Type=simple
+User=ec2-user
+ExecStart=/home/ec2-user/kafka_2.12-3.7.0/bin/kafka-server-start.sh /home/ec2-user/kafka_2.12-3.7.0/config/server.properties
+ExecStop=/home/ec2-user/kafka_2.12-3.7.0/bin/kafka-server-stop.sh
+Restart=on-abnormal
+
+[Install]
+WantedBy=multi-user.target 

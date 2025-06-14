@@ -100,7 +100,7 @@ def generate_data(producer):
 
 
 if __name__ == "__main__":
-    KAFKA_BROKER_URL = 'kafka:9092'
+    KAFKA_BROKER_URL = os.environ.get('KAFKA_BROKERS', 'kafka:9092')
     
     try:
         producer = create_kafka_producer(KAFKA_BROKER_URL)

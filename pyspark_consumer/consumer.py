@@ -12,19 +12,28 @@ logging.basicConfig(
 )
 
 from pyspark.sql import SparkSession
-from pyspark.sql.functions import from_json, col, sum as _sum, when, count, avg, window, to_date, current_timestamp, desc, year, to_timestamp
+from pyspark.sql.functions import from_json, col, sum as _sum, when, count, avg, window, to_date, current_timestamp, desc, year, to_timestamp, date_format, lit
 from pyspark.sql.types import StructType, StructField, StringType, IntegerType, DoubleType, TimestampType, DateType
 
+# --- Kafka e Redis Config ---
 KAFKA_PACKAGE = "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
-REDIS_HOST = "redis"
-REDIS_PORT = 6379
+REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
+REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BROKERS", "kafka:9092")
+
+# --- RDS Config ---
+DB_HOST = os.environ.get("DB_HOST")
+DB_NAME = os.environ.get("DB_NAME", "postgres")
+DB_USER = os.environ.get("DB_USER")
+DB_PASSWORD = os.environ.get("DB_PASSWORD")
+DB_URL = f"jdbc:postgresql://{DB_HOST}:5432/{DB_NAME}" if DB_HOST else None
 
 def create_spark_session():
-    return SparkSession.builder \
+    builder = SparkSession.builder \
         .appName("KafkaPySparkStreaming") \
-        .config("spark.jars.packages", KAFKA_PACKAGE) \
-        .config("spark.sql.shuffle.partitions", 4) \
-        .getOrCreate()
+        .config("spark.sql.shuffle.partitions", 4)
+    
+    return builder.getOrCreate()
 
 def define_schemas():
     transaction_schema = StructType([
@@ -55,6 +64,49 @@ def define_schemas():
 
 def get_redis_connection():
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+
+# -------- Funções de Escrita no RDS (para foreachBatch) --------
+def write_to_rds(spark, df, epoch_id, table_name, p_key, value_col):
+    mode = "overwrite"
+    temp_table_name = f"{table_name}_temp_{epoch_id}"
+
+    try:
+        if df.rdd.isEmpty():
+            logging.debug(f"write_to_rds({table_name}): DataFrame está vazio.")
+            return
+
+        logging.info(f"Escrevendo batch (Epoch ID: {epoch_id}) para a tabela {table_name}.")
+        
+        # Escreve o DataFrame do batch em uma tabela temporária
+        df.write.format("jdbc") \
+            .option("url", DB_URL) \
+            .option("dbtable", temp_table_name) \
+            .option("user", DB_USER) \
+            .option("password", DB_PASSWORD) \
+            .option("driver", "org.postgresql.Driver") \
+            .mode(mode) \
+            .save()
+
+        DriverManager = spark._jvm.java.sql.DriverManager
+        conn = DriverManager.getConnection(DB_URL, DB_USER, DB_PASSWORD)
+        
+        update_set_clause = f"{value_col} = EXCLUDED.{value_col}"
+        
+        sql = f"""
+            INSERT INTO {table_name} ({p_key}, {value_col})
+            SELECT {p_key}, {value_col} FROM {temp_table_name}
+            ON CONFLICT ({p_key}) DO UPDATE SET {update_set_clause}
+        """
+        stmt = conn.createStatement()
+        stmt.executeUpdate(sql)
+        stmt.executeUpdate(f"DROP TABLE {temp_table_name}")
+        stmt.close()
+        conn.close()
+
+        logging.info(f"Batch (Epoch ID: {epoch_id}) para a tabela {table_name} escrito com sucesso.")
+
+    except Exception as e:
+        logging.error(f"write_to_rds({table_name}): Falha ao escrever para o RDS (Epoch ID: {epoch_id}): {e}", exc_info=True)
 
 # -------- Funções de Escrita no Redis (para foreachBatch) --------
 
@@ -88,12 +140,10 @@ def write_ticket_medio(df, epoch_id):
             return
 
         r = get_redis_connection()
-        # Pega o valor mais recente do ticket médio do batch.
         last_record = df.orderBy(col("window.end").desc()).first()
         ticket_medio = last_record["TicketMedio"]
         
         logging.info(f"write_ticket_medio: Escrevendo no Redis -> Chave: analysis:ticket_medio, Valor: {ticket_medio}")
-        # Usa SET para salvar apenas o último valor, em vez de uma série histórica com ZADD.
         r.set("analysis:ticket_medio", ticket_medio)
         logging.info("write_ticket_medio: Escrita concluída.")
     except Exception as e:
@@ -129,7 +179,7 @@ def write_top_10_clientes(df, epoch_id):
         records = df.orderBy(desc("TotalGasto")).toJSON().map(lambda x: json.loads(x)).collect()
         
         logging.info(f"write_top_10_clientes: Escrevendo {len(records)} clientes no top 10.")
-        r.delete("analysis:top_10_clientes") # Limpa a lista antiga
+        r.delete("analysis:top_10_clientes") 
         with r.pipeline() as pipe:
             for record in records:
                 pipe.rpush("analysis:top_10_clientes", json.dumps({"ClienteID": record["ClienteID"], "TotalGasto": record["TotalGasto"]}))
@@ -161,48 +211,14 @@ def write_risk_alerts(df, epoch_id):
     except Exception as e:
         logging.error(f"write_risk_alerts: Falha ao escrever para o Redis: {e}", exc_info=True)
 
-def write_new_clients_count(df, epoch_id):
-    logging.info(f"Iniciando batch para 'new_clients_count' (Epoch ID: {epoch_id})")
-    try:
-        count = df.count()
-        if count == 0:
-            logging.info("write_new_clients_count: Nenhum cliente novo neste batch.")
-            return
-        
-        logging.info(f"write_new_clients_count: Adicionando {count} novos clientes ao contador total.")
-        r = get_redis_connection()
-        r.incrby("analysis:total_clients", count)
-        logging.info("write_new_clients_count: Contador de clientes atualizado com sucesso.")
-    except Exception as e:
-        logging.error(f"write_new_clients_count: Falha ao atualizar o contador no Redis: {e}", exc_info=True)
-
-def write_daily_metrics(df, epoch_id, key_name, value_field):
-    logging.info(f"Iniciando batch para métrica diária '{key_name}' (Epoch ID: {epoch_id})")
-    try:
-        if df.rdd.isEmpty():
-            logging.info(f"write_daily_metrics({key_name}): DataFrame está vazio.")
-            return
-            
-        r = get_redis_connection()
-        last_record = df.orderBy(col("window.end").desc()).first()
-        window_end = last_record["window"]["end"].isoformat()
-        metric_value = last_record[value_field]
-        
-        logging.info(f"write_daily_metrics({key_name}): Escrevendo no Redis -> Chave: analysis:{key_name}, Valor: {{{window_end}: {metric_value}}}")
-        r.zadd(f"analysis:{key_name}", {f"{window_end}": metric_value})
-        logging.info(f"write_daily_metrics({key_name}): Escrita concluída.")
-    except Exception as e:
-        logging.error(f"write_daily_metrics({key_name}): Falha ao escrever para o Redis: {e}", exc_info=True)
-
 def process_streams(spark, schemas):
-    """Lê dos tópicos Kafka e processa as análises, salvando no Redis."""
+    """Lê dos tópicos Kafka e processa as análises, salvando no Redis e RDS."""
     transaction_schema, score_schema, client_schema = schemas
-    kafka_bootstrap_servers = "kafka:9092"
     
     # -------- Leitura dos Tópicos Kafka --------
-    trans_df = spark.readStream.format("kafka").option("kafka.bootstrap.servers", kafka_bootstrap_servers).option("subscribe", "transacoes").load()
-    score_df = spark.readStream.format("kafka").option("kafka.bootstrap.servers", kafka_bootstrap_servers).option("subscribe", "scores").load()
-    client_df = spark.readStream.format("kafka").option("kafka.bootstrap.servers", kafka_bootstrap_servers).option("subscribe", "clientes").load()
+    trans_df = spark.readStream.format("kafka").option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS).option("subscribe", "transacoes").load()
+    score_df = spark.readStream.format("kafka").option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS).option("subscribe", "scores").load()
+    client_df = spark.readStream.format("kafka").option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS).option("subscribe", "clientes").load()
 
     # -------- Parse e Preparação dos Dados --------
     parsed_trans_df = trans_df.select(from_json(col("value").cast("string"), transaction_schema).alias("data")).select("data.*") \
@@ -257,35 +273,64 @@ def process_streams(spark, schemas):
         .filter((col("Score") < 400) & (col("LimiteCredito") > 15000)) \
         .select("CPF", "Score", "LimiteCredito")
 
-    # 7. Evolução do Volume de Transações (diário)
+    # 7. Evolução do Volume de Transações (diário) -> RDS
     evolucao_volume_diario = parsed_trans_df \
         .withWatermark("timestamp", "1 day") \
         .groupBy(window("timestamp", "1 day")) \
-        .agg(_sum("Valor").alias("VolumeDiario"))
+        .agg(_sum("Valor").alias("total_volume")) \
+        .withColumn("date", col("window.start").cast(DateType())) \
+        .withColumn("total_volume", col("total_volume").cast(DoubleType())) \
+        .select("date", "total_volume")
 
-    # 8. Taxa de Aquisição de Novos Clientes (diário) 
-    novos_clientes_diario = parsed_client_df.writeStream.outputMode("append").foreachBatch(write_new_clients_count).start()
+    # 8. Taxa de Aquisição de Novos Clientes (diário) -> RDS
+    novos_clientes_diario = parsed_client_df \
+        .withWatermark("timestamp", "1 day") \
+        .groupBy(window("timestamp", "1 day")) \
+        .agg(count("ID").alias("new_clients_count")) \
+        .withColumn("date", col("window.start").cast(DateType())) \
+        .withColumn("new_clients_count", col("new_clients_count").cast(IntegerType())) \
+        .select("date", "new_clients_count")
 
-    # 9. Tendência do Score Médio dos Clientes (diário)
+    # 9. Tendência do Score Médio dos Clientes (diário) -> RDS
     score_medio_diario = parsed_score_df \
         .withWatermark("timestamp", "1 day") \
         .groupBy(window("timestamp", "1 day")) \
-        .agg(avg("Score").alias("ScoreMedio"))
+        .agg(avg("Score").alias("average_score")) \
+        .withColumn("date", col("window.start").cast(DateType())) \
+        .withColumn("average_score", col("average_score").cast(DoubleType())) \
+        .select("date", "average_score")
 
-    # -------- Configuração e Início das Queries de Saída para o Redis --------
-    
+    # -------- Queries de Saída para o Redis (Tempo Real) --------
     score_distribution.writeStream.outputMode("complete").foreachBatch(write_score_distribution).start()
     ticket_medio.writeStream.outputMode("update").foreachBatch(write_ticket_medio).start()
     transactions_by_currency.writeStream.outputMode("complete").foreachBatch(write_volume_by_currency).start()
     top_clientes.writeStream.outputMode("complete").foreachBatch(write_top_10_clientes).start()
     faixa_etaria.writeStream.outputMode("complete").foreachBatch(write_age_distribution).start()
     alertas_risco.writeStream.outputMode("append").foreachBatch(write_risk_alerts).start()
-    evolucao_volume_diario.writeStream.outputMode("update").foreachBatch(lambda df, epoch_id: write_daily_metrics(df, epoch_id, "daily_volume", "VolumeDiario")).start()
-    score_medio_diario.writeStream.outputMode("update").foreachBatch(lambda df, epoch_id: write_daily_metrics(df, epoch_id, "daily_avg_score", "ScoreMedio")).start()
+    
+    # -------- Queries de Saída para o RDS (Histórico) --------
+    if DB_HOST:
+        logging.info("Configurando streams de escrita para o RDS...")
+        evolucao_volume_diario.writeStream \
+            .outputMode("update") \
+            .foreachBatch(lambda df, epoch_id: write_to_rds(spark, df, epoch_id, "daily_transaction_volume", "date", "total_volume")) \
+            .start()
+
+        novos_clientes_diario.writeStream \
+            .outputMode("update") \
+            .foreachBatch(lambda df, epoch_id: write_to_rds(spark, df, epoch_id, "daily_new_clients", "date", "new_clients_count")) \
+            .start()
+            
+        score_medio_diario.writeStream \
+            .outputMode("update") \
+            .foreachBatch(lambda df, epoch_id: write_to_rds(spark, df, epoch_id, "daily_average_score", "date", "average_score")) \
+            .start()
+    else:
+        logging.warning("Variáveis de ambiente do RDS não configuradas. As streams históricas não serão iniciadas.")
 
 def main():
     spark = create_spark_session()
-    spark.sparkContext.setLogLevel("INFO")
+    spark.sparkContext.setLogLevel("WARN")
     
     logging.info("Definindo schemas...")
     schemas = define_schemas()
@@ -293,7 +338,7 @@ def main():
     logging.info("Iniciando processamento dos streams...")
     process_streams(spark, schemas)
     
-    logging.info("Streaming queries iniciadas, enviando dados para o Redis. Pressione Ctrl+C para parar.")
+    logging.info("Streaming queries iniciadas, enviando dados para o Redis e RDS. Pressione Ctrl+C para parar.")
     spark.streams.awaitAnyTermination()
 
 if __name__ == "__main__":

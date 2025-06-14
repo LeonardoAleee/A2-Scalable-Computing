@@ -4,6 +4,8 @@ import pandas as pd
 import json
 import time
 import plotly.express as px
+import os
+import psycopg2
 
 # --- Configuração da Página ---
 st.set_page_config(
@@ -12,14 +14,39 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- Conexão com Redis ---
+# --- Conexões com Serviços ---
+REDIS_HOST = os.environ.get("REDIS_HOST", "redis")
+DB_HOST = os.environ.get("DB_HOST")
+DB_NAME = os.environ.get("DB_NAME", "postgres")
+DB_USER = os.environ.get("DB_USER")
+DB_PASSWORD = os.environ.get("DB_PASSWORD")
+
 @st.cache_resource
 def get_redis_connection():
-    return redis.Redis(host='redis', port=6379, db=0, decode_responses=True)
+    return redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True)
+
+@st.cache_resource
+def get_db_connection():
+    if not all([DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
+        return None
+    try:
+        conn = psycopg2.connect(
+            host=DB_HOST,
+            dbname=DB_NAME,
+            user=DB_USER,
+            password=DB_PASSWORD
+        )
+        return conn
+    except psycopg2.OperationalError as e:
+        st.error(f"Não foi possível conectar ao banco de dados: {e}")
+        return None
 
 r = get_redis_connection()
+db_conn = get_db_connection()
 
-# --- Funções para buscar dados do Redis ---
+# --- Funções para buscar dados ---
+
+# Funções Redis
 def get_hash_data(key_name):
     return r.hgetall(key_name)
 
@@ -32,8 +59,28 @@ def get_list_data(key_name):
 def get_set_data(key_name):
     return r.smembers(key_name)
 
+# Funções RDS
+@st.cache_data(ttl=60) # Cache por 60 segundos
+def get_historical_data(_conn, query):
+    if _conn is None:
+        return pd.DataFrame()
+    try:
+        return pd.read_sql_query(query, _conn)
+    except Exception as e:
+        st.error(f"Erro ao buscar dados do RDS: {e}")
+        return pd.DataFrame()
+
+@st.cache_data(ttl=60)
+def get_total_clients_from_db(_conn):
+    if _conn is None:
+        return 0
+    df = get_historical_data(_conn, "SELECT SUM(new_clients_count) as total FROM daily_new_clients;")
+    if not df.empty and df['total'][0] is not None:
+        return int(df['total'][0])
+    return 0
+
 # --- Layout do Dashboard ---
-st.title("🚀 Dashboard de Análise de Risco em Tempo Real")
+st.title("🚀 Dashboard de Análise de Risco em Tempo Real e Histórico")
 placeholder = st.empty()
 iteration_counter = 0
 
@@ -56,8 +103,8 @@ while True:
         risk_alerts_count = len(get_set_data("analysis:risk_alerts"))
         kpi3.metric(label="Clientes em Alerta de Risco", value=risk_alerts_count)
 
-        # KPI 4: Total de Clientes
-        total_clients = int(r.get("analysis:total_clients") or 0)
+        # KPI 4: Total de Clientes (do RDS)
+        total_clients = get_total_clients_from_db(db_conn)
         kpi4.metric(label="Total de Clientes", value=total_clients)
         
         st.markdown("---")
@@ -89,21 +136,47 @@ while True:
         
         st.markdown("---")
         
-        # --- Linha 3: Gráficos de Série Temporal ---
-        col3, col4 = st.columns(2)
+        # --- Linha 3: Gráficos de Série Temporal (Histórico do RDS) ---
+        st.subheader("Análises Históricas (últimos 30 dias)")
+        
+        col3, col4, col5 = st.columns(3)
         
         with col3:
-            st.subheader("Evolução Diária do Volume de Transações")
-            daily_volume_data = get_zset_data("analysis:daily_volume")
-            if daily_volume_data:
-                df_volume = pd.DataFrame(daily_volume_data, columns=['Data', 'Volume'])
-                df_volume['Data'] = pd.to_datetime(df_volume['Data'])
-                fig = px.bar(df_volume, x='Data', y='Volume', title="")
+            st.markdown("###### Volume Diário de Transações")
+            daily_volume_df = get_historical_data(db_conn, "SELECT date, total_volume FROM daily_transaction_volume WHERE date > (CURRENT_DATE - INTERVAL '30 days') AND date <= CURRENT_DATE ORDER BY date ASC;")
+            if not daily_volume_df.empty:
+                fig = px.bar(daily_volume_df, x='date', y='total_volume', labels={'date': 'Data', 'total_volume': 'Volume (R$)'})
+                fig.update_layout(margin=dict(l=20, r=20, t=0, b=0), height=300)
                 st.plotly_chart(fig, use_container_width=True, key=f"volume_chart_{iteration_counter}")
             else:
                 st.warning("Aguardando dados de volume diário...")
 
         with col4:
+            st.markdown("###### Score Médio Diário")
+            daily_score_df = get_historical_data(db_conn, "SELECT date, average_score FROM daily_average_score WHERE date > (CURRENT_DATE - INTERVAL '30 days') AND date <= CURRENT_DATE ORDER BY date ASC;")
+            if not daily_score_df.empty:
+                fig = px.line(daily_score_df, x='date', y='average_score', markers=True, labels={'date': 'Data', 'average_score': 'Score Médio'})
+                fig.update_layout(margin=dict(l=20, r=20, t=0, b=0), height=300)
+                st.plotly_chart(fig, use_container_width=True, key=f"score_chart_hist_{iteration_counter}")
+            else:
+                st.warning("Aguardando dados de score médio diário...")
+
+        with col5:
+            st.markdown("###### Novos Clientes por Dia")
+            daily_clients_df = get_historical_data(db_conn, "SELECT date, new_clients_count FROM daily_new_clients WHERE date > (CURRENT_DATE - INTERVAL '30 days') AND date <= CURRENT_DATE ORDER BY date ASC;")
+            if not daily_clients_df.empty:
+                fig = px.bar(daily_clients_df, x='date', y='new_clients_count', labels={'date': 'Data', 'new_clients_count': 'Novos Clientes'})
+                fig.update_layout(margin=dict(l=20, r=20, t=0, b=0), height=300)
+                st.plotly_chart(fig, use_container_width=True, key=f"clients_chart_{iteration_counter}")
+            else:
+                st.warning("Aguardando dados de novos clientes...")
+
+        st.markdown("---")
+
+        # --- Linha 4: Tabelas de Detalhes (Tempo Real) ---
+        col6, col7 = st.columns(2)
+
+        with col6:
             st.subheader("Top 10 Clientes por Gastos (Última Hora)")
             top_clients_data = get_list_data("analysis:top_10_clientes")
             if top_clients_data:
@@ -112,16 +185,14 @@ while True:
             else:
                 st.warning("Aguardando dados de top clientes...")
                 
-        st.markdown("---")
-        
-        # --- Linha 4: Tabelas de Detalhes ---
-        st.subheader("Alertas de Risco Ativos")
-        risk_alerts_data = get_set_data("analysis:risk_alerts")
-        if risk_alerts_data:
-            df_alerts = pd.DataFrame([json.loads(item) for item in risk_alerts_data])
-            st.dataframe(df_alerts, use_container_width=True)
-        else:
-            st.warning("Nenhum alerta de risco no momento.")
+        with col7:
+            st.subheader("Alertas de Risco Ativos")
+            risk_alerts_data = get_set_data("analysis:risk_alerts")
+            if risk_alerts_data:
+                df_alerts = pd.DataFrame([json.loads(item) for item in risk_alerts_data])
+                st.dataframe(df_alerts, use_container_width=True, height=360)
+            else:
+                st.warning("Nenhum alerta de risco no momento.")
 
     iteration_counter += 1
     time.sleep(5)
