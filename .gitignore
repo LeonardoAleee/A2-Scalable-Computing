@@ -3,3 +3,4 @@ hadoop_utils/
 .env
 .venv/
 glue_dependencies/
+db_utils/

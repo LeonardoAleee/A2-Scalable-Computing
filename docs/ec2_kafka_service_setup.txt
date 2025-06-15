@@ -1,7 +1,7 @@
 SEMPRE QUE LIGAR O EC2, O KAFKA É AUTOMATICAMENTE INICIADO
 
 # PARA ACESSAR O EC2 VIA POWERSHELL
-ssh -i "kafka-key.pem" ec2-user@ec2-54-235-141-200.compute-1.amazonaws.com 
+ssh -i "kafka-key.pem" ec2-user@ec2-54-235-141-200.compute-1.amazonaws.com
 OBS: Deve ter esse .pem no diretorio que voce rodar esse comando.
 
 # PARA VER SE O KAFKA ESTÁ DE FATO ATIVO

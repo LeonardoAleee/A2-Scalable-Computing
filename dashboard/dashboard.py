@@ -6,6 +6,20 @@ import time
 import plotly.express as px
 import os
 import psycopg2
+import logging
+import sys
+
+# --- Configuração de Logging Robusta ---
+# Cria um logger específico para o dashboard, imune a configurações do Streamlit
+logger = logging.getLogger('dashboard_logger')
+logger.setLevel(logging.INFO)
+# Evita adicionar handlers duplicados a cada atualização do Streamlit
+if not logger.handlers:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter('%(asctime)s - %(levelname)s - Dashboard - %(message)s')
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
 
 # --- Configuração da Página ---
 st.set_page_config(
@@ -23,41 +37,69 @@ DB_PASSWORD = os.environ.get("DB_PASSWORD")
 
 @st.cache_resource
 def get_redis_connection():
-    return redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True)
+    logger.info(f"Tentando conectar ao Redis em: {REDIS_HOST}")
+    try:
+        conn = redis.Redis(host=REDIS_HOST, port=6379, db=0, decode_responses=True)
+        conn.ping() # Verifica se a conexão é válida
+        logger.info("Conexão com Redis bem-sucedida.")
+        return conn
+    except Exception as e:
+        logger.error(f"Falha ao conectar ao Redis: {e}", exc_info=True)
+        st.error(f"Não foi possível conectar ao Redis em {REDIS_HOST}. Verifique as variáveis de ambiente e a conectividade de rede.")
+        return None
 
 @st.cache_resource
 def get_db_connection():
     if not all([DB_HOST, DB_NAME, DB_USER, DB_PASSWORD]):
         return None
     try:
+        logger.info(f"Tentando conectar ao RDS em: {DB_HOST}")
         conn = psycopg2.connect(
             host=DB_HOST,
             dbname=DB_NAME,
             user=DB_USER,
             password=DB_PASSWORD
         )
+        logger.info("Conexão com RDS bem-sucedida.")
         return conn
     except psycopg2.OperationalError as e:
+        logger.error(f"Não foi possível conectar ao banco de dados: {e}", exc_info=True)
         st.error(f"Não foi possível conectar ao banco de dados: {e}")
         return None
 
 r = get_redis_connection()
+# Interrompe a execução se a conexão com o Redis (crítica) falhar.
+if r is None:
+    st.stop()
+    
 db_conn = get_db_connection()
 
 # --- Funções para buscar dados ---
 
 # Funções Redis
 def get_hash_data(key_name):
-    return r.hgetall(key_name)
+    logger.info(f"Buscando dados HASH da chave: {key_name}")
+    data = r.hgetall(key_name)
+    logger.info(f"Encontrados {len(data)} itens para a chave {key_name}.")
+    return data
 
 def get_zset_data(key_name):
-    return r.zrange(key_name, 0, -1, withscores=True)
+    logger.info(f"Buscando dados ZSET da chave: {key_name}")
+    data = r.zrange(key_name, 0, -1, withscores=True)
+    logger.info(f"Encontrados {len(data)} itens para a chave {key_name}.")
+    return data
 
 def get_list_data(key_name):
-    return r.lrange(key_name, 0, -1)
+    logger.info(f"Buscando dados LIST da chave: {key_name}")
+    data = r.lrange(key_name, 0, -1)
+    logger.info(f"Encontrados {len(data)} itens para a chave {key_name}.")
+    return data
 
 def get_set_data(key_name):
-    return r.smembers(key_name)
+    logger.info(f"Buscando dados SET da chave: {key_name}")
+    data = r.smembers(key_name)
+    logger.info(f"Encontrados {len(data)} itens para a chave {key_name}.")
+    return data
 
 # Funções RDS
 @st.cache_data(ttl=60) # Cache por 60 segundos
@@ -72,11 +114,14 @@ def get_historical_data(_conn, query):
 
 @st.cache_data(ttl=60)
 def get_total_clients_from_db(_conn):
+    logger.info("Buscando contagem total de clientes do RDS.")
     if _conn is None:
+        logger.warning("Conexão com o banco de dados não disponível para buscar total de clientes.")
         return 0
     df = get_historical_data(_conn, "SELECT SUM(new_clients_count) as total FROM daily_new_clients;")
     if not df.empty and df['total'][0] is not None:
         return int(df['total'][0])
+    logger.warning("Não foi possível obter a contagem total de clientes do RDS.")
     return 0
 
 # --- Layout do Dashboard ---
@@ -87,6 +132,7 @@ iteration_counter = 0
 # --- Loop de atualização ---
 while True:
     with placeholder.container():
+        logger.info(f"Atualizando dashboard... Iteração: {iteration_counter}")
         # --- Linha 1: Métricas Globais ---
         kpi1, kpi2, kpi3, kpi4 = st.columns(4)
 
@@ -181,7 +227,7 @@ while True:
             top_clients_data = get_list_data("analysis:top_10_clientes")
             if top_clients_data:
                 df_top_clients = pd.DataFrame([json.loads(item) for item in top_clients_data])
-                st.dataframe(df_top_clients, use_container_width=True, height=360)
+                st.dataframe(df_top_clients, use_container_width=True, height=360, key=f"top_clients_df_{iteration_counter}")
             else:
                 st.warning("Aguardando dados de top clientes...")
                 
@@ -190,7 +236,7 @@ while True:
             risk_alerts_data = get_set_data("analysis:risk_alerts")
             if risk_alerts_data:
                 df_alerts = pd.DataFrame([json.loads(item) for item in risk_alerts_data])
-                st.dataframe(df_alerts, use_container_width=True, height=360)
+                st.dataframe(df_alerts, use_container_width=True, height=360, key=f"alerts_df_{iteration_counter}")
             else:
                 st.warning("Nenhum alerta de risco no momento.")
 
