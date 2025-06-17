@@ -1,0 +1,5 @@
+streamlit
+redis
+pandas
+plotly
+psycopg2-binary==2.9.9 
