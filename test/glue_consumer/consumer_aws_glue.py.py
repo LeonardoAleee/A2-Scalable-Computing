@@ -52,150 +52,150 @@ def define_schemas():
     return transaction_schema, score_schema, client_schema
 
 # ------------------------------------------------------------------
-# 3. FUNÇÕES DE ESCRITA NO POSTGRESQL
+# 3. FUNÇÕES DE ESCRITA NO POSTGRESQL (Sem alterações)
 # ------------------------------------------------------------------
 def write_truncate(df, epoch_id, table_name, db_args):
-    """Escreve um DataFrame em uma tabela usando TRUNCATE e INSERT."""
     logger.info(f"TRUNCATE/WRITE: Iniciando batch para a tabela '{table_name}' (Epoch ID: {epoch_id}).")
-    
-    # A URL e as propriedades JDBC são construídas com os argumentos do Job
     db_url = f"jdbc:postgresql://{db_args['db_host']}:{db_args['db_port']}/{db_args['db_name']}"
-    db_properties = {
-        "user": db_args['db_user'],
-        "password": db_args['db_password'],
-        "driver": "org.postgresql.Driver"
-    }
-    
+    db_properties = { "user": db_args['db_user'], "password": db_args['db_password'], "driver": "org.postgresql.Driver" }
     if df.rdd.isEmpty():
         logger.warning(f"TRUNCATE/WRITE: DataFrame para '{table_name}' está vazio. A tabela será truncada mesmo assim.")
-    
     try:
-        df.write.format("jdbc") \
-            .option("url", db_url) \
-            .option("dbtable", table_name) \
-            .option("truncate", "true") \
-            .option("user", db_properties["user"]) \
-            .option("password", db_properties["password"]) \
-            .option("driver", db_properties["driver"]) \
-            .mode("overwrite") \
-            .save()
+        df.write.mode("overwrite").format("jdbc").option("url", db_url).option("dbtable", table_name).option("truncate", "true").option("user", db_properties["user"]).option("password", db_properties["password"]).option("driver", db_properties["driver"]).save()
         logger.info(f"TRUNCATE/WRITE: Batch para a tabela '{table_name}' escrito com sucesso.")
     except Exception as e:
         logger.error(f"TRUNCATE/WRITE: Erro ao escrever na tabela '{table_name}'. Erro: {e}")
         raise e
 
 def write_postgres_upsert(df, epoch_id, table_name, pk_column, db_args):
-    """Realiza um UPSERT (INSERT ON CONFLICT) usando psycopg2."""
     logger.info(f"UPSERT: Iniciando batch para '{table_name}' (Epoch ID: {epoch_id}).")
-    
     data = df.collect()
     if not data:
         logger.info(f"UPSERT: DataFrame para '{table_name}' está vazio. Pulando.")
         return
-
     conn = None
     try:
-        logger.info(f"UPSERT: Conectando ao banco de dados em {db_args['db_host']}...")
-        conn = psycopg2.connect(
-            host=db_args['db_host'],
-            dbname=db_args['db_name'],
-            user=db_args['db_user'],
-            password=db_args['db_password'],
-            port=db_args['db_port']
-        )
+        conn = psycopg2.connect(host=db_args['db_host'], dbname=db_args['db_name'], user=db_args['db_user'], password=db_args['db_password'], port=db_args['db_port'])
         cursor = conn.cursor()
-        logger.info("UPSERT: Conexão com PostgreSQL estabelecida.")
-        
         cols = df.columns
         cols_sql = ", ".join([f'"{c}"' for c in cols])
         update_cols = ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in cols if c != pk_column])
-        
-        sql = f"""
-            INSERT INTO {table_name} ({cols_sql}) VALUES %s
-            ON CONFLICT ({pk_column}) DO UPDATE SET {update_cols};
-        """
-        
+        sql = f"""INSERT INTO {table_name} ({cols_sql}) VALUES %s ON CONFLICT ({pk_column}) DO UPDATE SET {update_cols};"""
         values = [tuple(row) for row in data]
         execute_values(cursor, sql, values)
         conn.commit()
         logger.info(f"UPSERT: {len(data)} linhas escritas com sucesso em '{table_name}'.")
-
     except Exception as e:
         logger.error(f"UPSERT: Erro ao escrever na tabela '{table_name}': {e}")
         if conn: conn.rollback()
         raise e
     finally:
-        if conn:
-            conn.close()
-            logger.info("UPSERT: Conexão com PostgreSQL fechada.")
-
+        if conn: conn.close()
 
 def write_postgres_increment(df, epoch_id, table_name, pk_column, increment_cols, db_args):
-    """Realiza um UPSERT que INCREMENTA os valores de colunas especificadas."""
     logger.info(f"INCREMENT: Iniciando batch para '{table_name}' (Epoch ID: {epoch_id}).")
-    
     data = df.collect()
     if not data:
         logger.info(f"INCREMENT: DataFrame para '{table_name}' está vazio. Pulando.")
         return
-
     conn = None
     try:
-        logger.info(f"INCREMENT: Conectando ao banco de dados em {db_args['db_host']}...")
-        conn = psycopg2.connect(
-            host=db_args['db_host'],
-            dbname=db_args['db_name'],
-            user=db_args['db_user'],
-            password=db_args['db_password'],
-            port=db_args['db_port']
-        )
+        conn = psycopg2.connect(host=db_args['db_host'], dbname=db_args['db_name'], user=db_args['db_user'], password=db_args['db_password'], port=db_args['db_port'])
         cursor = conn.cursor()
-        logger.info("INCREMENT: Conexão com PostgreSQL estabelecida.")
-
         all_cols = df.columns
         all_cols_sql = ", ".join([f'"{c}"' for c in all_cols])
         update_clause = ", ".join([f'"{c}" = {table_name}."{c}" + EXCLUDED."{c}"' for c in increment_cols])
-        
-        # Lógica para colunas que não são de incremento (caso existam)
         non_increment_cols = [c for c in all_cols if c not in increment_cols and c != pk_column]
         if non_increment_cols:
              update_clause += ", " + ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in non_increment_cols])
-        
-        sql = f"""
-            INSERT INTO {table_name} ({all_cols_sql}) VALUES %s
-            ON CONFLICT ({pk_column}) DO UPDATE SET {update_clause};
-        """
-        
+        sql = f"""INSERT INTO {table_name} ({all_cols_sql}) VALUES %s ON CONFLICT ({pk_column}) DO UPDATE SET {update_clause};"""
         values = [tuple(row) for row in data]
         execute_values(cursor, sql, values)
         conn.commit()
         logger.info(f"INCREMENT: {len(data)} linhas escritas com sucesso em '{table_name}'.")
-
     except Exception as e:
         logger.error(f"INCREMENT: Erro ao escrever na tabela '{table_name}': {e}")
         if conn: conn.rollback()
         raise e
     finally:
-        if conn:
-            conn.close()
-            logger.info("INCREMENT: Conexão com PostgreSQL fechada.")
+        if conn: conn.close()
 
-def process_and_write_top_10(df, epoch_id, db_args):
-    """Aplica o ranking no micro-batch e escreve o resultado usando TRUNCATE/WRITE."""
-    logger.info(f"TOP 10: Processando batch (Epoch ID: {epoch_id}).")
+# --- FUNÇÕES DE PROCESSAMENTO DE MICRO-LOTE ---
+def process_transactions_batch(df, epoch_id, db_args):
+    logger.info(f"Processando lote de TRANSAÇÕES (Epoch: {epoch_id})")
+    if df.count() == 0:
+        logger.info("Lote de transações vazio.")
+        return
+    df.cache()
+
+    # Ticket Médio
+    ticket_medio = df.agg(coalesce(avg("Valor"), lit(0.0)).alias("ticket_medio")).withColumn("id", lit("singleton"))
+    write_postgres_upsert(ticket_medio, epoch_id, "analysis_ticket_medio", "id", db_args)
+
+    # Volume por Moeda
+    volume_by_currency = df.groupBy("Moeda").agg(_sum("Valor").alias("volume_total"), count("ID").alias("quantidade")).withColumnRenamed("Moeda", "moeda")
+    write_postgres_increment(volume_by_currency, epoch_id, "analysis_volume_by_currency", "moeda", ["volume_total", "quantidade"], db_args)
+
+    # Top 10 Clientes
+    cliente_gastos = df.groupBy("ClienteID").agg(_sum("Valor").alias("TotalGasto"))
     windowSpec = Window.orderBy(desc("TotalGasto"))
-    top_10_df = df.withColumn("rank", row_number().over(windowSpec)) \
-                  .filter(col("rank") <= 10) \
-                  .select(col("rank"), col("ClienteID").alias("cliente_id"), col("TotalGasto").alias("total_gasto"))
-    
+    top_10_df = cliente_gastos.withColumn("rank", row_number().over(windowSpec)).filter(col("rank") <= 10).select(col("rank"), col("ClienteID").alias("cliente_id"), col("TotalGasto").alias("total_gasto"))
     write_truncate(top_10_df, epoch_id, "analysis_top_10_clientes", db_args)
+
+    # Volume Diário
+    daily_volume = df.groupBy(to_date(col("timestamp")).alias("date")).agg(_sum("Valor").alias("total_volume"))
+    write_postgres_upsert(daily_volume, epoch_id, "daily_transaction_volume", "date", db_args)
+    
+    df.unpersist()
+
+def process_scores_batch(df, epoch_id, db_args):
+    logger.info(f"Processando lote de SCORES (Epoch: {epoch_id})")
+    if df.count() == 0:
+        logger.info("Lote de scores vazio.")
+        return
+    df.cache()
+
+    # Distribuição por Score
+    score_distribution = df.withColumn("faixa_score", when(col("Score") < 300, "Baixo").when((col("Score") >= 300) & (col("Score") < 700), "Médio").when(col("Score") >= 700, "Alto").otherwise("Excelente")).groupBy("faixa_score").agg(count("*").alias("count"))
+    write_postgres_increment(score_distribution, epoch_id, "analysis_score_distribution", "faixa_score", ["count"], db_args)
+
+    # Alertas de Risco
+    logger.info("Calculando Alertas de Risco...")
+    risk_alerts = df.filter((col("Score") < 400) & (col("LimiteCredito") > 15000)) \
+                    .select(col("CPF").alias("cpf"), col("Score").alias("score"), col("LimiteCredito").alias("limite_credito")) \
+                    .dropDuplicates(["cpf"]) # CORREÇÃO: Garante que há apenas um alerta por CPF em cada lote
+    write_truncate(risk_alerts, epoch_id, "analysis_risk_alerts", db_args)
+    
+    # Score Médio Diário
+    logger.info("Calculando Score Médio Diário...")
+    daily_average_score = df.groupBy(to_date(col("timestamp")).alias("date")).agg(avg("Score").alias("average_score"))
+    write_postgres_upsert(daily_average_score, epoch_id, "daily_average_score", "date", db_args)
+    
+    df.unpersist()
+
+def process_clients_batch(df, epoch_id, db_args):
+    logger.info(f"Processando lote de CLIENTES (Epoch: {epoch_id})")
+    if df.count() == 0:
+        logger.info("Lote de clientes vazio.")
+        return
+    df.cache()
+    
+    # Distribuição por Idade
+    age_distribution = df.withColumn("Idade", (year(current_timestamp()) - year(col("DataNasc")))).withColumn("faixa_etaria", when(col("Idade") < 25, "18-24").when((col("Idade") >= 25) & (col("Idade") < 35), "25-34").when((col("Idade") >= 35) & (col("Idade") < 45), "35-44").when((col("Idade") >= 45) & (col("Idade") < 55), "45-54").when(col("Idade") >= 55, "55+").otherwise("N/A")).groupBy("faixa_etaria").agg(count("*").alias("count"))
+    write_postgres_increment(age_distribution, epoch_id, "analysis_age_distribution", "faixa_etaria", ["count"], db_args)
+    
+    # Novos Clientes Diário
+    daily_new_clients = df.groupBy(to_date(col("timestamp")).alias("date")).agg(count("ID").alias("new_clients_count"))
+    write_postgres_upsert(daily_new_clients, epoch_id, "daily_new_clients", "date", db_args)
+    
+    df.unpersist()
+
 
 # ------------------------------------------------------------------
 # 4. SCRIPT PRINCIPAL DO JOB GLUE
 # ------------------------------------------------------------------
 logger.info("Iniciando o Job Glue de streaming Kafka -> Postgres.")
 
-# Obtenção dos parâmetros do Job
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
     'kafka_bootstrap_servers',
@@ -207,171 +207,65 @@ args = getResolvedOptions(sys.argv, [
     'db_name',
     'db_user',
     'db_password',
-    'checkpoint_s3_path' # Caminho base para os checkpoints no S3
+    'checkpoint_s3_path'
 ])
 
-# Inicialização do GlueContext e SparkSession
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
 job = Job(glueContext)
 job.init(args['JOB_NAME'], args)
-spark.sparkContext.setLogLevel("ERROR") # Reduz a verbosidade do Spark, mantendo nossos logs
+spark.sparkContext.setLogLevel("ERROR")
 
-# Definição dos Schemas
 transaction_schema, score_schema, client_schema = define_schemas()
 
-# Função para ler um tópico Kafka
-def read_kafka_topic(topic_name, connection_name):
-    logger.info(f"Configurando stream para o tópico '{topic_name}' em '{args['kafka_bootstrap_servers']}'.")
-    kafka_options = {
-        "connection.name": connection_name,
-        "connection.type": "kafka",
-        "kafka.bootstrap.servers": args['kafka_bootstrap_servers'],
-        "subscribe": topic_name,
-        "startingOffsets": "earliest" # ou "latest"
-    }
+def read_kafka_topic_spark(spark_session, bootstrap_servers, topic_name):
+    """Lê um tópico do Kafka usando o método spark.readStream."""
+    logger.info(f"Configurando stream para o tópico '{topic_name}' via spark.readStream.")
     try:
-        stream_dyf = glueContext.create_data_frame_from_options(
-            connection_options=kafka_options,
-            transformation_ctx=connection_name
-        )
-        logger.info(f"Stream para '{topic_name}' configurado com sucesso.")
-        return stream_dyf.toDF()
+        df = spark_session.readStream \
+            .format("kafka") \
+            .option("kafka.bootstrap.servers", bootstrap_servers) \
+            .option("subscribe", topic_name) \
+            .option("startingOffsets", "earliest") \
+            .load()
+        logger.info(f"Stream para o tópico '{topic_name}' configurado com sucesso.")
+        return df
     except Exception as e:
         logger.error(f"Falha CRÍTICA ao configurar o stream para o tópico '{topic_name}'. Erro: {e}")
         raise e
 
-# Leitura dos Tópicos Kafka
-trans_df = read_kafka_topic(args['kafka_topic_transacoes'], "transacoes_stream")
-score_df = read_kafka_topic(args['kafka_topic_scores'], "scores_stream")
-client_df = read_kafka_topic(args['kafka_topic_clientes'], "clientes_stream")
+bootstrap_servers = args['kafka_bootstrap_servers']
+trans_df_raw = read_kafka_topic_spark(spark, bootstrap_servers, args['kafka_topic_transacoes'])
+score_df_raw = read_kafka_topic_spark(spark, bootstrap_servers, args['kafka_topic_scores'])
+client_df_raw = read_kafka_topic_spark(spark, bootstrap_servers, args['kafka_topic_clientes'])
 
-# Parse e Preparação dos Dados
-logger.info("Aplicando parsing e transformações iniciais nos DataFrames.")
-parsed_trans_df = trans_df.select(from_json(col("value").cast("string"), transaction_schema).alias("data")).select("data.*").withColumn("timestamp", to_timestamp(col("Data")))
-parsed_score_df = score_df.select(from_json(col("value").cast("string"), score_schema).alias("data")).select("data.*").withColumn("timestamp", to_timestamp(col("AtualizadoEm")))
-parsed_client_df = client_df.select(from_json(col("value").cast("string"), client_schema).alias("data")).select("data.*").withColumn("timestamp", current_timestamp()).withColumn("DataNasc", to_date(col("DataNasc"), "yyyy-MM-dd"))
+parsed_trans_df = trans_df_raw.selectExpr("CAST(value AS STRING) as json").select(from_json(col("json"), transaction_schema).alias("data")).select("data.*").withColumn("timestamp", to_timestamp(col("Data")))
+parsed_score_df = score_df_raw.selectExpr("CAST(value AS STRING) as json").select(from_json(col("json"), score_schema).alias("data")).select("data.*").withColumn("timestamp", to_timestamp(col("AtualizadoEm")))
+parsed_client_df = client_df_raw.selectExpr("CAST(value AS STRING) as json").select(from_json(col("json"), client_schema).alias("data")).select("data.*").withColumn("DataNasc", to_date(col("DataNasc"), "yyyy-MM-dd")).withColumn("timestamp", current_timestamp())
 
-# --- Definição e Escrita das Análises ---
+# --- ESTRUTURA FOREACHBATCH ---
+logger.info("Configurando os streams de saída com foreachBatch.")
 
-# 1. Distribuição por Score (INCREMENT)
-logger.info("Configurando stream de análise: Distribuição por Score.")
-score_distribution = parsed_score_df.groupBy("Score").agg(count("*").alias("count")) \
-    .withColumn("faixa_score",
-        when(col("Score") < 300, "Baixo")
-        .when((col("Score") >= 300) & (col("Score") < 700), "Médio")
-        .when(col("Score") >= 700, "Alto")
-        .otherwise("Excelente")
-    ).groupBy("faixa_score").agg(_sum("count").alias("count"))
-
-score_distribution.writeStream \
-    .outputMode("complete") \
-    .foreachBatch(lambda df, epoch: write_postgres_increment(df, epoch, "analysis_score_distribution", "faixa_score", ["count"], args)) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/score_distribution/") \
-    .start()
-
-# 2. Ticket Médio (UPSERT)
-logger.info("Configurando stream de análise: Ticket Médio.")
-ticket_medio = parsed_trans_df.agg(coalesce(avg("Valor"), lit(0.0)).alias("ticket_medio")).withColumn("id", lit("singleton"))
-
-ticket_medio.writeStream \
-    .outputMode("complete") \
-    .foreachBatch(lambda df, epoch: write_postgres_upsert(df, epoch, "analysis_ticket_medio", "id", args)) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/ticket_medio/") \
-    .start()
-    
-# 3. Volume por Moeda (INCREMENT)
-logger.info("Configurando stream de análise: Volume por Moeda.")
-volume_by_currency = parsed_trans_df.groupBy("Moeda").agg(
-    _sum("Valor").alias("volume_total"),
-    count("ID").alias("quantidade")
-).withColumnRenamed("Moeda", "moeda")
-
-volume_by_currency.writeStream \
-    .outputMode("complete") \
-    .foreachBatch(lambda df, epoch: write_postgres_increment(df, epoch, "analysis_volume_by_currency", "moeda", ["volume_total", "quantidade"], args)) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/volume_by_currency/") \
-    .start()
-
-# 4. Top 10 Clientes (TRUNCATE)
-logger.info("Configurando stream de análise: Top 10 Clientes.")
-cliente_gastos = parsed_trans_df.groupBy("ClienteID").agg(_sum("Valor").alias("TotalGasto"))
-
-cliente_gastos.writeStream \
-    .outputMode("complete") \
-    .foreachBatch(lambda df, epoch: process_and_write_top_10(df, epoch, args)) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/top_10_clientes/") \
-    .start()
-
-# 5. Distribuição por Idade (INCREMENT)
-logger.info("Configurando stream de análise: Distribuição por Idade.")
-age_distribution = parsed_client_df \
-    .withColumn("Idade", (year(current_timestamp()) - year(col("DataNasc")))) \
-    .withColumn("faixa_etaria",
-        when(col("Idade") < 25, "18-24")
-        .when((col("Idade") >= 25) & (col("Idade") < 35), "25-34")
-        .when((col("Idade") >= 35) & (col("Idade") < 45), "35-44")
-        .when((col("Idade") >= 45) & (col("Idade") < 55), "45-54")
-        .when(col("Idade") >= 55, "55+")
-        .otherwise("N/A")
-    ).groupBy("faixa_etaria").agg(count("*").alias("count"))
-
-age_distribution.writeStream \
-    .outputMode("complete") \
-    .foreachBatch(lambda df, epoch: write_postgres_increment(df, epoch, "analysis_age_distribution", "faixa_etaria", ["count"], args)) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/age_distribution/") \
-    .start()
-
-# 6. Alertas de Risco (TRUNCATE)
-logger.info("Configurando stream de análise: Alertas de Risco.")
-risk_alerts = parsed_score_df \
-    .filter((col("Score") < 400) & (col("LimiteCredito") > 15000)) \
-    .select(
-        col("CPF").alias("cpf"),
-        col("Score").alias("score"),
-        col("LimiteCredito").alias("limite_credito")
-    ).distinct()
-
-risk_alerts.writeStream \
-    .outputMode("complete") \
-    .foreachBatch(lambda df, epoch: write_truncate(df, epoch, "analysis_risk_alerts", args)) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/risk_alerts/") \
-    .start()
-
-# 7. Análises com Janela de Tempo e Watermark (UPSERT)
-logger.info("Configurando streams de análise com janela de tempo (Diárias).")
-daily_volume = parsed_trans_df.withWatermark("timestamp", "10 minutes") \
-    .groupBy(window("timestamp", "1 day")).agg(_sum("Valor").alias("total_volume")) \
-    .select(col("window.start").cast(DateType()).alias("date"), "total_volume")
-
-daily_new_clients = parsed_client_df.withWatermark("timestamp", "10 minutes") \
-    .groupBy(window("timestamp", "1 day")).agg(count("ID").alias("new_clients_count")) \
-    .select(col("window.start").cast(DateType()).alias("date"), "new_clients_count")
-
-daily_average_score = parsed_score_df.withWatermark("timestamp", "10 minutes") \
-    .groupBy(window("timestamp", "1 day")).agg(avg("Score").alias("average_score")) \
-    .select(col("window.start").cast(DateType()).alias("date"), "average_score")
-
-daily_volume.writeStream \
+query_transacoes = parsed_trans_df.writeStream \
     .outputMode("update") \
-    .foreachBatch(lambda df, epoch: write_postgres_upsert(df, epoch, "daily_transaction_volume", "date", args)) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/daily_volume/") \
+    .foreachBatch(lambda df, epoch_id: process_transactions_batch(df, epoch_id, args)) \
+    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/transacoes/") \
     .start()
 
-daily_new_clients.writeStream \
+query_scores = parsed_score_df.writeStream \
     .outputMode("update") \
-    .foreachBatch(lambda df, epoch: write_postgres_upsert(df, epoch, "daily_new_clients", "date", args)) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/daily_new_clients/") \
+    .foreachBatch(lambda df, epoch_id: process_scores_batch(df, epoch_id, args)) \
+    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/scores/") \
     .start()
 
-daily_average_score.writeStream \
+query_clientes = parsed_client_df.writeStream \
     .outputMode("update") \
-    .foreachBatch(lambda df, epoch: write_postgres_upsert(df, epoch, "daily_average_score", "date", args)) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/daily_average_score/") \
+    .foreachBatch(lambda df, epoch_id: process_clients_batch(df, epoch_id, args)) \
+    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/clientes/") \
     .start()
 
-# Aguarda a finalização de qualquer um dos streams para encerrar o job (o Glue gerencia isso)
+
 logger.info("Todos os streams foram configurados. O Job Glue irá aguardar a terminação.")
 spark.streams.awaitAnyTermination()
 
