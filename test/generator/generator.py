@@ -71,7 +71,7 @@ def generate_data(producer):
                 'CPF': cpf,
                 'Score': random.randint(0, 1000),
                 'RendaMensal': round(random.uniform(1200, 15000), 2),
-                'LimiteCredito': round(random.uniform(500, 50000), 2),
+                'LimiteCredito': round(random.uniform(1000, 30000), 2),
                 'AtualizadoEm': datetime.utcnow().isoformat()
             }
 

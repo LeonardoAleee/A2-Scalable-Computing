@@ -59,7 +59,8 @@ def write_truncate(df, epoch_id, table_name, db_args):
     db_url = f"jdbc:postgresql://{db_args['db_host']}:{db_args['db_port']}/{db_args['db_name']}"
     db_properties = { "user": db_args['db_user'], "password": db_args['db_password'], "driver": "org.postgresql.Driver" }
     if df.rdd.isEmpty():
-        logger.warning(f"TRUNCATE/WRITE: DataFrame para '{table_name}' está vazio. A tabela será truncada mesmo assim.")
+        logger.warning(f"TRUNCATE/WRITE: DataFrame para '{table_name}' está vazio. Pulando a escrita para evitar apagar dados.")
+        return
     try:
         df.write.mode("overwrite").format("jdbc").option("url", db_url).option("dbtable", table_name).option("truncate", "true").option("user", db_properties["user"]).option("password", db_properties["password"]).option("driver", db_properties["driver"]).save()
         logger.info(f"TRUNCATE/WRITE: Batch para a tabela '{table_name}' escrito com sucesso.")
@@ -93,10 +94,13 @@ def write_postgres_upsert(df, epoch_id, table_name, pk_column, db_args):
         if conn: conn.close()
 
 def write_postgres_increment(df, epoch_id, table_name, pk_column, increment_cols, db_args):
-    logger.info(f"INCREMENT: Iniciando batch para '{table_name}' (Epoch ID: {epoch_id}).")
+    """
+    Realiza um UPSERT que INCREMENTA os valores das colunas especificadas.
+    """
+    logger.info(f"INCREMENT/UPSERT: Iniciando batch para '{table_name}' (Epoch ID: {epoch_id}).")
     data = df.collect()
     if not data:
-        logger.info(f"INCREMENT: DataFrame para '{table_name}' está vazio. Pulando.")
+        logger.info(f"INCREMENT/UPSERT: DataFrame para '{table_name}' está vazio. Pulando.")
         return
     conn = None
     try:
@@ -104,17 +108,23 @@ def write_postgres_increment(df, epoch_id, table_name, pk_column, increment_cols
         cursor = conn.cursor()
         all_cols = df.columns
         all_cols_sql = ", ".join([f'"{c}"' for c in all_cols])
+        
+        # Cláusula para incrementar colunas
         update_clause = ", ".join([f'"{c}" = {table_name}."{c}" + EXCLUDED."{c}"' for c in increment_cols])
-        non_increment_cols = [c for c in all_cols if c not in increment_cols and c != pk_column]
-        if non_increment_cols:
-             update_clause += ", " + ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in non_increment_cols])
+        
+        # Cláusula para atualizar outras colunas (comportamento de UPSERT padrão)
+        other_cols = [c for c in all_cols if c not in increment_cols and c != pk_column]
+        if other_cols:
+            update_clause += ", " + ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in other_cols])
+        
         sql = f"""INSERT INTO {table_name} ({all_cols_sql}) VALUES %s ON CONFLICT ({pk_column}) DO UPDATE SET {update_clause};"""
+        
         values = [tuple(row) for row in data]
         execute_values(cursor, sql, values)
         conn.commit()
-        logger.info(f"INCREMENT: {len(data)} linhas escritas com sucesso em '{table_name}'.")
+        logger.info(f"INCREMENT/UPSERT: {len(data)} linhas escritas com sucesso em '{table_name}'.")
     except Exception as e:
-        logger.error(f"INCREMENT: Erro ao escrever na tabela '{table_name}': {e}")
+        logger.error(f"INCREMENT/UPSERT: Erro ao escrever na tabela '{table_name}': {e}")
         if conn: conn.rollback()
         raise e
     finally:
@@ -144,7 +154,7 @@ def process_transactions_batch(df, epoch_id, db_args):
 
     # Volume Diário
     daily_volume = df.groupBy(to_date(col("timestamp")).alias("date")).agg(_sum("Valor").alias("total_volume"))
-    write_postgres_upsert(daily_volume, epoch_id, "daily_transaction_volume", "date", db_args)
+    write_postgres_increment(daily_volume, epoch_id, "daily_transaction_volume", "date", ["total_volume"], db_args)
     
     df.unpersist()
 
@@ -163,8 +173,8 @@ def process_scores_batch(df, epoch_id, db_args):
     logger.info("Calculando Alertas de Risco...")
     risk_alerts = df.filter((col("Score") < 400) & (col("LimiteCredito") > 15000)) \
                     .select(col("CPF").alias("cpf"), col("Score").alias("score"), col("LimiteCredito").alias("limite_credito")) \
-                    .dropDuplicates(["cpf"]) # CORREÇÃO: Garante que há apenas um alerta por CPF em cada lote
-    write_truncate(risk_alerts, epoch_id, "analysis_risk_alerts", db_args)
+                    .dropDuplicates(["cpf"]) 
+    write_postgres_upsert(risk_alerts, epoch_id, "analysis_risk_alerts", "cpf", db_args)
     
     # Score Médio Diário
     logger.info("Calculando Score Médio Diário...")
@@ -186,7 +196,7 @@ def process_clients_batch(df, epoch_id, db_args):
     
     # Novos Clientes Diário
     daily_new_clients = df.groupBy(to_date(col("timestamp")).alias("date")).agg(count("ID").alias("new_clients_count"))
-    write_postgres_upsert(daily_new_clients, epoch_id, "daily_new_clients", "date", db_args)
+    write_postgres_increment(daily_new_clients, epoch_id, "daily_new_clients", "date", ["new_clients_count"], db_args)
     
     df.unpersist()
 
