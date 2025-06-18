@@ -7,7 +7,7 @@ import psycopg2
 import sys
 from datetime import datetime
 
-# --- Função de Logging Direto ---
+# --- Função de Logging ---
 def log_message(level, message):
     timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S,%f')[:-3]
     print(f"{timestamp} - {level} - DashboardDB - {message}", file=sys.stderr, flush=True)
@@ -64,6 +64,7 @@ def get_data_from_db(_conn, query):
 st.title("Dashboard de Análise de Risco")
 placeholder = st.empty()
 iteration_counter = 0
+today = datetime.now().strftime("%d/%m/%Y")
 
 # --- Loop de atualização ---
 while True:
@@ -94,7 +95,7 @@ while True:
         col1, col2 = st.columns(2)
 
         with col1:
-            st.subheader("Distribuição de Clientes por Score")
+            st.subheader(f"Distribuição de Clientes por Score a partir de {today}")
             df_score = get_data_from_db(db_conn, "SELECT faixa_score, count FROM analysis_score_distribution;")
             if not df_score.empty:
                 fig = px.bar(df_score, x='faixa_score', y='count', title="", text_auto=True, labels={'faixa_score': 'Faixa de Score', 'count': 'Quantidade'})
@@ -103,7 +104,7 @@ while True:
                 st.warning("Aguardando dados de distribuição de score...")
 
         with col2:
-            st.subheader("Distribuição de Clientes por Faixa Etária")
+            st.subheader(f"Distribuição de Clientes por Faixa Etária a partir de {today}")
             df_age = get_data_from_db(db_conn, "SELECT faixa_etaria, count FROM analysis_age_distribution;")
             if not df_age.empty:
                 fig = px.pie(df_age, names='faixa_etaria', values='count', title="", labels={'faixa_etaria': 'Faixa Etária', 'count': 'Quantidade'})
@@ -151,7 +152,7 @@ while True:
         col6, col7 = st.columns(2)
 
         with col6:
-            st.subheader("Top 10 Clientes por Gastos")
+            st.subheader(f"Top 10 Clientes por Gastos a partir de {today}")
             df_top_clients = get_data_from_db(db_conn, "SELECT rank, cliente_id, total_gasto FROM analysis_top_10_clientes ORDER BY rank ASC;")
             if not df_top_clients.empty:
                 st.dataframe(df_top_clients, use_container_width=True, height=360, key=f"top_clients_df_{iteration_counter}")

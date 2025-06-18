@@ -29,7 +29,6 @@ DB_PROPERTIES = {
 }
 
 def create_spark_session():
-    """Cria e configura a sessão do Spark."""
     return SparkSession.builder \
         .appName("KafkaToPostgresStreaming") \
         .config("spark.sql.shuffle.partitions", "4") \
@@ -37,7 +36,6 @@ def create_spark_session():
         .getOrCreate()
 
 def define_schemas():
-    """Define os schemas para os dados do Kafka."""
     transaction_schema = StructType([
         StructField("ID", StringType(), True),
         StructField("ClienteID", StringType(), True),
@@ -64,11 +62,9 @@ def define_schemas():
 # -------- Funções de Escrita no Banco de Dados --------
 
 def write_truncate(df, epoch_id, table_name):
-    """Escreve um DataFrame em uma tabela usando TRUNCATE e INSERT."""
     logging.info(f"write_truncate: Iniciando batch para a tabela '{table_name}' (Epoch ID: {epoch_id}).")
     if df.rdd.isEmpty():
         logging.info(f"write_truncate: DataFrame para '{table_name}' está vazio. Pulando.")
-        # Mesmo se o DF estiver vazio, podemos querer limpar a tabela (ex: não há mais alertas)
         df.write.format("jdbc") \
             .option("url", DB_URL) \
             .option("dbtable", table_name) \
@@ -92,9 +88,6 @@ def write_truncate(df, epoch_id, table_name):
     logging.info(f"write_truncate: Batch para a tabela '{table_name}' escrito com sucesso.")
 
 def write_postgres_upsert(df, epoch_id, table_name, pk_column):
-    """
-    Realiza um UPSERT (INSERT ON CONFLICT) em uma tabela PostgreSQL.
-    """
     logging.info(f"UPSERT: Iniciando batch para a tabela '{table_name}' (Epoch ID: {epoch_id}).")
     
     data = df.collect()
@@ -140,72 +133,18 @@ def write_postgres_upsert(df, epoch_id, table_name, pk_column):
         if conn:
             conn.close()
 
-# --- FUNÇÃO DE INCREMENTO ---
-def write_postgres_increment(df, epoch_id, table_name, pk_column, increment_cols):
-    """
-    Realiza um UPSERT que INCREMENTA os valores das colunas especificadas.
-    :param df: DataFrame do Spark
-    :param epoch_id: ID do batch
-    :param table_name: Nome da tabela de destino
-    :param pk_column: Nome da coluna que é a chave primária
-    :param increment_cols: Uma lista de nomes de colunas a serem incrementadas
-    """
-    logging.info(f"INCREMENT: Iniciando batch para a tabela '{table_name}' (Epoch ID: {epoch_id}).")
-    
-    data = df.collect()
-    if not data:
-        logging.info(f"INCREMENT: DataFrame para '{table_name}' está vazio. Pulando.")
-        return
-
-    conn = None
-    try:
-        conn = psycopg2.connect(host=DB_HOST, dbname=DB_NAME, user=DB_USER, password=DB_PASSWORD)
-        cursor = conn.cursor()
-
-        all_cols = df.columns
-        all_cols_sql = ", ".join([f'"{c}"' for c in all_cols])
-        
-        update_clause = ", ".join([f'"{c}" = {table_name}."{c}" + EXCLUDED."{c}"' for c in increment_cols])
-        
-        sql = f"""
-            INSERT INTO {table_name} ({all_cols_sql})
-            VALUES %s
-            ON CONFLICT ({pk_column}) DO UPDATE SET
-            {update_clause};
-        """
-        
-        values = [tuple(row) for row in data]
-        execute_values(cursor, sql, values)
-        conn.commit()
-        logging.info(f"INCREMENT: {len(data)} linhas escritas com sucesso em '{table_name}'.")
-
-    except Exception as e:
-        logging.error(f"INCREMENT: Erro ao escrever na tabela '{table_name}': {e}")
-        if conn:
-            conn.rollback()
-        raise
-    finally:
-        if conn:
-            conn.close()
-
 # --- Função para Processar o Top 10 ---
 def process_and_write_top_10(df, epoch_id):
-    """
-    Aplica o ranking no micro-batch e escreve o resultado.
-    Esta função é chamada para cada lote de dados pelo foreachBatch.
-    """
     logging.info(f"process_and_write_top_10: Processando batch para Top 10 (Epoch ID: {epoch_id}).")
-    # A janela agora é aplicada no micro-batch (que é um DF estático)
     windowSpec = Window.orderBy(desc("TotalGasto"))
     top_10_df = df.withColumn("rank", row_number().over(windowSpec)) \
                    .filter(col("rank") <= 10) \
                    .select(col("rank"), col("ClienteID").alias("cliente_id"), col("TotalGasto").alias("total_gasto"))
     
-    # Reutiliza a função de escrita que já temos
-    write_truncate(top_10_df, epoch_id, "analysis_top_10_clientes")
+    if not top_10_df.rdd.isEmpty():
+        write_truncate(top_10_df, epoch_id, "analysis_top_10_clientes")
 
 def process_streams(spark, schemas):
-    """Lê dos tópicos Kafka e processa as análises, salvando no banco de dados."""
     transaction_schema, score_schema, client_schema = schemas
 
     # Leitura dos Tópicos Kafka
@@ -261,16 +200,14 @@ def process_streams(spark, schemas):
             .otherwise("N/A")
         ).groupBy("faixa_etaria").agg(count("*").alias("count"))
     
-    # 6. Alertas de Risco (TRUNCATE/INSERT)
+    # 6. Alertas de Risco (Acumulativo)
     risk_alerts = parsed_score_df \
         .filter((col("Score") < 400) & (col("LimiteCredito") > 15000)) \
         .select(
             col("CPF").alias("cpf"),
             col("Score").alias("score"),
             col("LimiteCredito").alias("limite_credito")
-        ) \
-        .groupBy("cpf", "score", "limite_credito").agg(count("*").alias("dummy")) \
-        .drop("dummy")
+        )
 
     # 7. Volume Diário (Histórico - UPSERT)
     daily_volume = parsed_trans_df.withWatermark("timestamp", "1 day") \
@@ -288,29 +225,26 @@ def process_streams(spark, schemas):
         .select(col("window.start").cast(DateType()).alias("date"), "average_score")
 
     
-    # --- Análises que precisam INCREMENTAR ---
+    # --- Análises que precisam de UPSERT para manter o estado atual ---
     score_distribution.writeStream \
         .outputMode("complete") \
-        .foreachBatch(lambda df, epoch: write_postgres_increment(df, epoch, 
+        .foreachBatch(lambda df, epoch: write_postgres_upsert(df, epoch, 
             "analysis_score_distribution", 
-            pk_column="faixa_score", 
-            increment_cols=["count"])) \
+            pk_column="faixa_score")) \
         .start()
 
     volume_by_currency.writeStream \
         .outputMode("complete") \
-        .foreachBatch(lambda df, epoch: write_postgres_increment(df, epoch, 
+        .foreachBatch(lambda df, epoch: write_postgres_upsert(df, epoch, 
             "analysis_volume_by_currency", 
-            pk_column="moeda", 
-            increment_cols=["volume_total", "quantidade"])) \
+            pk_column="moeda")) \
         .start()
 
     age_distribution.writeStream \
         .outputMode("complete") \
-        .foreachBatch(lambda df, epoch: write_postgres_increment(df, epoch, 
+        .foreachBatch(lambda df, epoch: write_postgres_upsert(df, epoch, 
             "analysis_age_distribution", 
-            pk_column="faixa_etaria", 
-            increment_cols=["count"])) \
+            pk_column="faixa_etaria")) \
         .start()
 
     # --- Análises que precisam SOBRESCREVER (UPSERT) ---
@@ -319,6 +253,13 @@ def process_streams(spark, schemas):
         .foreachBatch(lambda df, epoch: write_postgres_upsert(df, epoch, 
             "analysis_ticket_medio", 
             pk_column="id")) \
+        .start()
+
+    risk_alerts.writeStream \
+        .outputMode("append") \
+        .foreachBatch(lambda df, epoch: write_postgres_upsert(df, epoch, 
+            "analysis_risk_alerts", 
+            pk_column="cpf")) \
         .start()
 
     daily_volume.writeStream \
@@ -344,7 +285,6 @@ def process_streams(spark, schemas):
 
     # --- Análises que precisam APAGAR E REESCREVER (TRUNCATE) ---
     cliente_gastos.writeStream.outputMode("complete").foreachBatch(process_and_write_top_10).start()
-    risk_alerts.writeStream.outputMode("complete").foreachBatch(lambda df, epoch: write_truncate(df, epoch, "analysis_risk_alerts")).start()
 
 def main():
     spark = create_spark_session()
