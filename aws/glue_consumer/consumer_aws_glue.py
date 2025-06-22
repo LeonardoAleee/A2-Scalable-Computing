@@ -137,6 +137,8 @@ def process_transactions_batch(df, epoch_id, db_args):
     daily_volume = df.groupBy(to_date(col("timestamp")).alias("date")).agg(_sum("Valor").alias("total_volume"))
     write_postgres_increment(daily_volume, epoch_id, "daily_transaction_volume", "date", ["total_volume"], db_args)
     
+    log_message_consumption(df, epoch_id)
+
     df.unpersist()
 
 def process_scores_batch(df, epoch_id, db_args):
@@ -220,12 +222,6 @@ parsed_score_df = score_df_raw.selectExpr("CAST(value AS STRING) as json").selec
 parsed_client_df = client_df_raw.selectExpr("CAST(value AS STRING) as json").select(from_json(col("json"), client_schema).alias("data")).select("data.*").withColumn("DataNasc", to_date(col("DataNasc"), "yyyy-MM-dd")).withColumn("timestamp", current_timestamp())
 
 # --- ESTRUTURA FOREACHBATCH ---
-# --- Logging de Latência ---
-query_latencia = parsed_trans_df.writeStream \
-    .outputMode("append") \
-    .foreachBatch(log_message_consumption) \
-    .option("checkpointLocation", f"{args['checkpoint_s3_path']}/latencia/") \
-    .start()
 
 query_transacoes = parsed_trans_df.writeStream \
     .outputMode("update") \
