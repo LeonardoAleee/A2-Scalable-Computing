@@ -220,8 +220,7 @@ parsed_score_df = score_df_raw.selectExpr("CAST(value AS STRING) as json").selec
 parsed_client_df = client_df_raw.selectExpr("CAST(value AS STRING) as json").select(from_json(col("json"), client_schema).alias("data")).select("data.*").withColumn("DataNasc", to_date(col("DataNasc"), "yyyy-MM-dd")).withColumn("timestamp", current_timestamp())
 
 # --- ESTRUTURA FOREACHBATCH ---
-
-# Adicionado stream exclusivo para log de latência
+# --- Logging de Latência ---
 query_latencia = parsed_trans_df.writeStream \
     .outputMode("append") \
     .foreachBatch(log_message_consumption) \

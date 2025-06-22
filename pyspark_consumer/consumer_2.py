@@ -161,7 +161,7 @@ def process_streams(spark, schemas):
     parsed_score_df = score_df.select(from_json(col("value").cast("string"), score_schema).alias("data")).select("data.*").withColumn("timestamp", to_timestamp(col("AtualizadoEm")))
     parsed_client_df = client_df.select(from_json(col("value").cast("string"), client_schema).alias("data")).select("data.*").withColumn("timestamp", current_timestamp()).withColumn("DataNasc", to_date(col("DataNasc"), "yyyy-MM-dd"))
 
-    # --- Logging de Latência (antes de qualquer agregação) ---
+    # --- Logging de Latência ---
     parsed_trans_df.writeStream \
         .outputMode("append") \
         .foreachBatch(log_message_consumption) \

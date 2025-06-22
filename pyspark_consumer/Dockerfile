@@ -12,7 +12,6 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copia o script do consumidor para o contêiner
-# Renomeamos para 'consumer.py' para simplicidade no comando CMD
 COPY consumer_2.py /app/consumer.py
 
 # Comando para executar o script Python que inicia a aplicação Spark

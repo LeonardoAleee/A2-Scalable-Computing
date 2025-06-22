@@ -14,5 +14,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copia o script do dashboard
 COPY dashboard_2.py .
 
-# Define o comando para iniciar o aplicativo Streamlit, apontando para o script correto
 CMD ["streamlit", "run", "dashboard_2.py"] 

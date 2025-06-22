@@ -89,6 +89,8 @@ def generate_data(producer):
                 logging.info(f"SEND_MSG_LOG: id={transaction_id}, timestamp={send_timestamp.isoformat()}")
 
             producer.flush()
+
+            logging.info(f"--- Lote de dados com {_+1} transações enviado para o Kafka ---")
             time.sleep(random.uniform(0.5, 2.0))
 
         except Exception as e:
