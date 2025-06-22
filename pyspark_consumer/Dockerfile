@@ -1,28 +1,18 @@
-FROM python:3.11-slim
+# Use uma imagem base Python
+FROM python:3.9-slim
 
-# Variáveis de ambiente
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+# Instala o Java (dependência do PySpark)
+RUN apt-get update && apt-get install -y default-jdk && apt-get clean
 
-# Instala dependências do sistema: Java (para Spark) e procps (para o comando 'ps')
-# O uso de 'USER root' é temporário para permitir a instalação.
-USER root
-RUN apt-get update && apt-get install -y default-jdk procps && \
-    rm -rf /var/lib/apt/lists/*
-
-# Configura o JAVA_HOME, essencial para o Spark encontrar o Java.
-ENV JAVA_HOME /usr/lib/jvm/default-java
-
-# Define o diretório de trabalho para a aplicação.
+# Define o diretório de trabalho
 WORKDIR /app
 
-# Copia e instala as dependências do Python.
+# Copia e instala as dependências Python
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia o restante dos arquivos da aplicação.
-COPY . .
+# Copia o script do consumidor para o contêiner
+COPY consumer_2.py /app/consumer.py
 
-# Comando para rodar a aplicação.
-# O Spark é executado como o usuário padrão do contêiner a partir daqui.
-CMD ["spark-submit", "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0,org.postgresql:postgresql:42.6.0", "consumer.py"] 
+# Comando para executar o script Python que inicia a aplicação Spark
+CMD ["python", "consumer.py"] 

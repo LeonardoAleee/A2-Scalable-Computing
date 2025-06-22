@@ -1,16 +1,17 @@
-FROM python:3.11-slim
+# Define a imagem base
+FROM python:3.9-slim
 
+# Define o diretório de trabalho
 WORKDIR /app
 
-# Instala as dependências
+# Define a porta que o Streamlit irá usar
+EXPOSE 8501
+
+# Copia e instala as dependências
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copia os arquivos da aplicação
-COPY . .
+# Copia o script do dashboard
+COPY dashboard_2.py .
 
-# Expõe a porta do Streamlit
-EXPOSE 8501
-
-# Comando para rodar a aplicação
-CMD ["streamlit", "run", "dashboard.py"] 
+CMD ["streamlit", "run", "dashboard_2.py"] 

@@ -62,7 +62,6 @@ def define_schemas():
 # -------- Funções de Escrita no Banco de Dados --------
 
 def write_truncate(df, epoch_id, table_name):
-    logging.info(f"write_truncate: Iniciando batch para a tabela '{table_name}' (Epoch ID: {epoch_id}).")
     if df.rdd.isEmpty():
         logging.info(f"write_truncate: DataFrame para '{table_name}' está vazio. Pulando.")
         df.write.format("jdbc") \
@@ -75,7 +74,6 @@ def write_truncate(df, epoch_id, table_name):
             .mode("overwrite") \
             .save()
         return
-
     df.write.format("jdbc") \
         .option("url", DB_URL) \
         .option("dbtable", table_name) \
@@ -85,15 +83,10 @@ def write_truncate(df, epoch_id, table_name):
         .option("driver", "org.postgresql.Driver") \
         .mode("overwrite") \
         .save()
-    logging.info(f"write_truncate: Batch para a tabela '{table_name}' escrito com sucesso.")
 
 def write_postgres_upsert(df, epoch_id, table_name, pk_column):
-    logging.info(f"UPSERT: Iniciando batch para a tabela '{table_name}' (Epoch ID: {epoch_id}).")
-    
     data = df.collect()
-
     if not data:
-        logging.info(f"UPSERT: DataFrame para '{table_name}' está vazio. Pulando.")
         return
 
     conn = None
@@ -122,10 +115,7 @@ def write_postgres_upsert(df, epoch_id, table_name, pk_column):
         execute_values(cursor, sql, values)
 
         conn.commit()
-        logging.info(f"UPSERT: {len(data)} linhas escritas com sucesso em '{table_name}'.")
-
     except Exception as e:
-        logging.error(f"UPSERT: Erro ao escrever na tabela '{table_name}': {e}")
         if conn:
             conn.rollback()
         raise
@@ -135,7 +125,6 @@ def write_postgres_upsert(df, epoch_id, table_name, pk_column):
 
 # --- Função para Processar o Top 10 ---
 def process_and_write_top_10(df, epoch_id):
-    logging.info(f"process_and_write_top_10: Processando batch para Top 10 (Epoch ID: {epoch_id}).")
     windowSpec = Window.orderBy(desc("TotalGasto"))
     top_10_df = df.withColumn("rank", row_number().over(windowSpec)) \
                    .filter(col("rank") <= 10) \
@@ -143,6 +132,15 @@ def process_and_write_top_10(df, epoch_id):
     
     if not top_10_df.rdd.isEmpty():
         write_truncate(top_10_df, epoch_id, "analysis_top_10_clientes")
+
+def log_message_consumption(df, epoch_id):
+    if df.rdd.isEmpty():
+        return
+    
+    consumed_df = df.withColumn("consume_timestamp", current_timestamp())
+    
+    for row in consumed_df.select("ID", "consume_timestamp").collect():
+        logging.info(f"CONSUME_MSG_LOG: id={row['ID']}, timestamp={row['consume_timestamp'].isoformat()}")
 
 def process_streams(spark, schemas):
     transaction_schema, score_schema, client_schema = schemas
@@ -162,6 +160,12 @@ def process_streams(spark, schemas):
     parsed_trans_df = trans_df.select(from_json(col("value").cast("string"), transaction_schema).alias("data")).select("data.*").withColumn("timestamp", to_timestamp(col("Data")))
     parsed_score_df = score_df.select(from_json(col("value").cast("string"), score_schema).alias("data")).select("data.*").withColumn("timestamp", to_timestamp(col("AtualizadoEm")))
     parsed_client_df = client_df.select(from_json(col("value").cast("string"), client_schema).alias("data")).select("data.*").withColumn("timestamp", current_timestamp()).withColumn("DataNasc", to_date(col("DataNasc"), "yyyy-MM-dd"))
+
+    # --- Logging de Latência ---
+    parsed_trans_df.writeStream \
+        .outputMode("append") \
+        .foreachBatch(log_message_consumption) \
+        .start()
 
     # --- Definição das Análises ---
 

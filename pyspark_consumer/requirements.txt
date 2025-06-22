@@ -1,4 +1,2 @@
-pyspark==3.5.0
-dotenv
-redis
-psycopg2-binary==2.9.9
+pyspark==3.3.0
+psycopg2-binary 

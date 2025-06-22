@@ -12,22 +12,15 @@ from pyspark.sql.types import StructType, StructField, StringType, IntegerType, 
 from pyspark.sql.window import Window
 
 # ------------------------------------------------------------------
-# 1. CONFIGURAÇÃO DE LOGS DETALHADOS
+# 1. CONFIGURAÇÃO DE LOGS
 # ------------------------------------------------------------------
-logger = logging.getLogger("GlueKafkaToPostgres")
-logger.setLevel(logging.INFO)
-if not logger.handlers:
-    handler = logging.StreamHandler(sys.stdout)
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    handler.setFormatter(formatter)
-    logger.addHandler(handler)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s', stream=sys.stdout)
 
 # ------------------------------------------------------------------
 # 2. DEFINIÇÃO DOS SCHEMAS
 # ------------------------------------------------------------------
 def define_schemas():
     """Define os schemas para os dados do Kafka."""
-    logger.info("Definindo os schemas para os tópicos do Kafka.")
     transaction_schema = StructType([
         StructField("ID", StringType(), True),
         StructField("ClienteID", StringType(), True),
@@ -52,27 +45,21 @@ def define_schemas():
     return transaction_schema, score_schema, client_schema
 
 # ------------------------------------------------------------------
-# 3. FUNÇÕES DE ESCRITA NO POSTGRESQL (Sem alterações)
+# 3. FUNÇÕES DE ESCRITA NO POSTGRESQL
 # ------------------------------------------------------------------
 def write_truncate(df, epoch_id, table_name, db_args):
-    logger.info(f"TRUNCATE/WRITE: Iniciando batch para a tabela '{table_name}' (Epoch ID: {epoch_id}).")
     db_url = f"jdbc:postgresql://{db_args['db_host']}:{db_args['db_port']}/{db_args['db_name']}"
     db_properties = { "user": db_args['db_user'], "password": db_args['db_password'], "driver": "org.postgresql.Driver" }
     if df.rdd.isEmpty():
-        logger.warning(f"TRUNCATE/WRITE: DataFrame para '{table_name}' está vazio. Pulando a escrita para evitar apagar dados.")
         return
     try:
         df.write.mode("overwrite").format("jdbc").option("url", db_url).option("dbtable", table_name).option("truncate", "true").option("user", db_properties["user"]).option("password", db_properties["password"]).option("driver", db_properties["driver"]).save()
-        logger.info(f"TRUNCATE/WRITE: Batch para a tabela '{table_name}' escrito com sucesso.")
     except Exception as e:
-        logger.error(f"TRUNCATE/WRITE: Erro ao escrever na tabela '{table_name}'. Erro: {e}")
         raise e
 
 def write_postgres_upsert(df, epoch_id, table_name, pk_column, db_args):
-    logger.info(f"UPSERT: Iniciando batch para '{table_name}' (Epoch ID: {epoch_id}).")
     data = df.collect()
     if not data:
-        logger.info(f"UPSERT: DataFrame para '{table_name}' está vazio. Pulando.")
         return
     conn = None
     try:
@@ -85,22 +72,15 @@ def write_postgres_upsert(df, epoch_id, table_name, pk_column, db_args):
         values = [tuple(row) for row in data]
         execute_values(cursor, sql, values)
         conn.commit()
-        logger.info(f"UPSERT: {len(data)} linhas escritas com sucesso em '{table_name}'.")
     except Exception as e:
-        logger.error(f"UPSERT: Erro ao escrever na tabela '{table_name}': {e}")
         if conn: conn.rollback()
         raise e
     finally:
         if conn: conn.close()
 
 def write_postgres_increment(df, epoch_id, table_name, pk_column, increment_cols, db_args):
-    """
-    Realiza um UPSERT que INCREMENTA os valores das colunas especificadas.
-    """
-    logger.info(f"INCREMENT/UPSERT: Iniciando batch para '{table_name}' (Epoch ID: {epoch_id}).")
     data = df.collect()
     if not data:
-        logger.info(f"INCREMENT/UPSERT: DataFrame para '{table_name}' está vazio. Pulando.")
         return
     conn = None
     try:
@@ -109,10 +89,8 @@ def write_postgres_increment(df, epoch_id, table_name, pk_column, increment_cols
         all_cols = df.columns
         all_cols_sql = ", ".join([f'"{c}"' for c in all_cols])
         
-        # Cláusula para incrementar colunas
         update_clause = ", ".join([f'"{c}" = {table_name}."{c}" + EXCLUDED."{c}"' for c in increment_cols])
         
-        # Cláusula para atualizar outras colunas (comportamento de UPSERT padrão)
         other_cols = [c for c in all_cols if c not in increment_cols and c != pk_column]
         if other_cols:
             update_clause += ", " + ", ".join([f'"{c}" = EXCLUDED."{c}"' for c in other_cols])
@@ -122,79 +100,73 @@ def write_postgres_increment(df, epoch_id, table_name, pk_column, increment_cols
         values = [tuple(row) for row in data]
         execute_values(cursor, sql, values)
         conn.commit()
-        logger.info(f"INCREMENT/UPSERT: {len(data)} linhas escritas com sucesso em '{table_name}'.")
     except Exception as e:
-        logger.error(f"INCREMENT/UPSERT: Erro ao escrever na tabela '{table_name}': {e}")
         if conn: conn.rollback()
         raise e
     finally:
         if conn: conn.close()
 
+# --- FUNÇÃO DE LOG DE CONSUMO ---
+def log_message_consumption(df, epoch_id):
+    """Loga o ID e o timestamp de consumo de cada mensagem da transação."""
+    if df.rdd.isEmpty():
+        return
+    
+    consumed_df = df.withColumn("consume_timestamp", current_timestamp())
+    
+    for row in consumed_df.select("ID", "consume_timestamp").collect():
+        logging.info(f"CONSUME_MSG_LOG: id={row['ID']}, timestamp={row['consume_timestamp'].isoformat()}")
+
 # --- FUNÇÕES DE PROCESSAMENTO DE MICRO-LOTE ---
 def process_transactions_batch(df, epoch_id, db_args):
-    logger.info(f"Processando lote de TRANSAÇÕES (Epoch: {epoch_id})")
     if df.count() == 0:
-        logger.info("Lote de transações vazio.")
         return
     df.cache()
 
-    # Ticket Médio
     ticket_medio = df.agg(coalesce(avg("Valor"), lit(0.0)).alias("ticket_medio")).withColumn("id", lit("singleton"))
     write_postgres_upsert(ticket_medio, epoch_id, "analysis_ticket_medio", "id", db_args)
 
-    # Volume por Moeda
     volume_by_currency = df.groupBy("Moeda").agg(_sum("Valor").alias("volume_total"), count("ID").alias("quantidade")).withColumnRenamed("Moeda", "moeda")
     write_postgres_increment(volume_by_currency, epoch_id, "analysis_volume_by_currency", "moeda", ["volume_total", "quantidade"], db_args)
 
-    # Top 10 Clientes
     cliente_gastos = df.groupBy("ClienteID").agg(_sum("Valor").alias("TotalGasto"))
     windowSpec = Window.orderBy(desc("TotalGasto"))
     top_10_df = cliente_gastos.withColumn("rank", row_number().over(windowSpec)).filter(col("rank") <= 10).select(col("rank"), col("ClienteID").alias("cliente_id"), col("TotalGasto").alias("total_gasto"))
     write_truncate(top_10_df, epoch_id, "analysis_top_10_clientes", db_args)
 
-    # Volume Diário
     daily_volume = df.groupBy(to_date(col("timestamp")).alias("date")).agg(_sum("Valor").alias("total_volume"))
     write_postgres_increment(daily_volume, epoch_id, "daily_transaction_volume", "date", ["total_volume"], db_args)
     
+    log_message_consumption(df, epoch_id)
+
     df.unpersist()
 
 def process_scores_batch(df, epoch_id, db_args):
-    logger.info(f"Processando lote de SCORES (Epoch: {epoch_id})")
     if df.count() == 0:
-        logger.info("Lote de scores vazio.")
         return
     df.cache()
 
-    # Distribuição por Score
     score_distribution = df.withColumn("faixa_score", when(col("Score") < 300, "Baixo").when((col("Score") >= 300) & (col("Score") < 700), "Médio").when(col("Score") >= 700, "Alto").otherwise("Excelente")).groupBy("faixa_score").agg(count("*").alias("count"))
     write_postgres_increment(score_distribution, epoch_id, "analysis_score_distribution", "faixa_score", ["count"], db_args)
 
-    # Alertas de Risco
-    logger.info("Calculando Alertas de Risco...")
     risk_alerts = df.filter((col("Score") < 400) & (col("LimiteCredito") > 15000)) \
                     .select(col("CPF").alias("cpf"), col("Score").alias("score"), col("LimiteCredito").alias("limite_credito")) \
                     .dropDuplicates(["cpf"]) 
     write_postgres_upsert(risk_alerts, epoch_id, "analysis_risk_alerts", "cpf", db_args)
     
-    # Score Médio Diário
-    logger.info("Calculando Score Médio Diário...")
     daily_average_score = df.groupBy(to_date(col("timestamp")).alias("date")).agg(avg("Score").alias("average_score"))
     write_postgres_upsert(daily_average_score, epoch_id, "daily_average_score", "date", db_args)
     
     df.unpersist()
 
 def process_clients_batch(df, epoch_id, db_args):
-    logger.info(f"Processando lote de CLIENTES (Epoch: {epoch_id})")
     if df.count() == 0:
-        logger.info("Lote de clientes vazio.")
         return
     df.cache()
     
-    # Distribuição por Idade
     age_distribution = df.withColumn("Idade", (year(current_timestamp()) - year(col("DataNasc")))).withColumn("faixa_etaria", when(col("Idade") < 25, "18-24").when((col("Idade") >= 25) & (col("Idade") < 35), "25-34").when((col("Idade") >= 35) & (col("Idade") < 45), "35-44").when((col("Idade") >= 45) & (col("Idade") < 55), "45-54").when(col("Idade") >= 55, "55+").otherwise("N/A")).groupBy("faixa_etaria").agg(count("*").alias("count"))
     write_postgres_increment(age_distribution, epoch_id, "analysis_age_distribution", "faixa_etaria", ["count"], db_args)
     
-    # Novos Clientes Diário
     daily_new_clients = df.groupBy(to_date(col("timestamp")).alias("date")).agg(count("ID").alias("new_clients_count"))
     write_postgres_increment(daily_new_clients, epoch_id, "daily_new_clients", "date", ["new_clients_count"], db_args)
     
@@ -204,8 +176,6 @@ def process_clients_batch(df, epoch_id, db_args):
 # ------------------------------------------------------------------
 # 4. SCRIPT PRINCIPAL DO JOB GLUE
 # ------------------------------------------------------------------
-logger.info("Iniciando o Job Glue de streaming Kafka -> Postgres.")
-
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
     'kafka_bootstrap_servers',
@@ -231,7 +201,6 @@ transaction_schema, score_schema, client_schema = define_schemas()
 
 def read_kafka_topic_spark(spark_session, bootstrap_servers, topic_name):
     """Lê um tópico do Kafka usando o método spark.readStream."""
-    logger.info(f"Configurando stream para o tópico '{topic_name}' via spark.readStream.")
     try:
         df = spark_session.readStream \
             .format("kafka") \
@@ -239,10 +208,8 @@ def read_kafka_topic_spark(spark_session, bootstrap_servers, topic_name):
             .option("subscribe", topic_name) \
             .option("startingOffsets", "earliest") \
             .load()
-        logger.info(f"Stream para o tópico '{topic_name}' configurado com sucesso.")
         return df
     except Exception as e:
-        logger.error(f"Falha CRÍTICA ao configurar o stream para o tópico '{topic_name}'. Erro: {e}")
         raise e
 
 bootstrap_servers = args['kafka_bootstrap_servers']
@@ -255,7 +222,6 @@ parsed_score_df = score_df_raw.selectExpr("CAST(value AS STRING) as json").selec
 parsed_client_df = client_df_raw.selectExpr("CAST(value AS STRING) as json").select(from_json(col("json"), client_schema).alias("data")).select("data.*").withColumn("DataNasc", to_date(col("DataNasc"), "yyyy-MM-dd")).withColumn("timestamp", current_timestamp())
 
 # --- ESTRUTURA FOREACHBATCH ---
-logger.info("Configurando os streams de saída com foreachBatch.")
 
 query_transacoes = parsed_trans_df.writeStream \
     .outputMode("update") \
@@ -276,7 +242,6 @@ query_clientes = parsed_client_df.writeStream \
     .start()
 
 
-logger.info("Todos os streams foram configurados. O Job Glue irá aguardar a terminação.")
 spark.streams.awaitAnyTermination()
 
 job.commit()
