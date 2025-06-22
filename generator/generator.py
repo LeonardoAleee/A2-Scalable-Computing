@@ -18,7 +18,6 @@ try:
     seed_value = f"{socket.gethostname()}-{os.getpid()}"
     Faker.seed(seed_value)
     random.seed(seed_value)
-    logging.info(f"Gerador inicializado com a semente: {seed_value}")
 except Exception as e:
     logging.warning(f"Não foi possível definir uma semente determinística: {e}. Usando aleatoriedade padrão.")
 
@@ -36,7 +35,6 @@ def create_kafka_producer(bootstrap_servers):
                 value_serializer=lambda v: json.dumps(v).encode('utf-8'),
                 key_serializer=lambda k: k.encode('utf-8') if k else None
             )
-            logging.info("Conexão com o Kafka estabelecida com sucesso.")
             return producer
         except Exception as e:
             logging.warning(f"Falha ao conectar ao Kafka: {e}. Tentando novamente em 5 segundos... (Tentativa {i+1}/10)")
@@ -51,8 +49,6 @@ def generate_data(producer):
     client_topic = 'clientes'
     score_topic = 'scores'
     transaction_topic = 'transacoes'
-
-    logging.info(f"Iniciando a geração de dados para os tópicos: {client_topic}, {score_topic}, {transaction_topic}")
 
     while True:
         try:
@@ -71,7 +67,7 @@ def generate_data(producer):
                 'CPF': cpf,
                 'Score': random.randint(0, 1000),
                 'RendaMensal': round(random.uniform(1200, 15000), 2),
-                'LimiteCredito': round(random.uniform(500, 50000), 2),
+                'LimiteCredito': round(random.uniform(1000, 30000), 2),
                 'AtualizadoEm': datetime.utcnow().isoformat()
             }
 
@@ -81,17 +77,18 @@ def generate_data(producer):
             # Gera um número aleatório de transações para o cliente
             for _ in range(random.randint(1, 5)):
                 transaction_id = str(fake.uuid4())
+                send_timestamp = datetime.utcnow()
                 transaction_data = {
                     'ID': transaction_id,
                     'ClienteID': client_id,
-                    'Data': datetime.utcnow().isoformat(),
+                    'Data': send_timestamp.isoformat(),
                     'Valor': round(random.uniform(10, 2000), 2),
                     'Moeda': random.choice(['BRL', 'USD', 'EUR'])
                 }
                 producer.send(transaction_topic, key=transaction_id, value=transaction_data)
+                logging.info(f"SEND_MSG_LOG: id={transaction_id}, timestamp={send_timestamp.isoformat()}")
 
             producer.flush()
-            logging.info(f"--- Lote de dados com {_+1} transações enviado para o Kafka ---")
             time.sleep(random.uniform(0.5, 2.0))
 
         except Exception as e:

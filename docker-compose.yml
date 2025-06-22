@@ -1,3 +1,5 @@
+version: '3.8'
+
 services:
   zookeeper:
     image: confluentinc/cp-zookeeper:7.3.0
@@ -20,36 +22,73 @@ services:
       KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
       KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
-      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+
+  postgres:
+    image: postgres:13-alpine
+    container_name: postgres_db
+    env_file:
+      - .env
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  db-setup:
+    build: ./db_utils
+    container_name: db_setup
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      DB_PORT: 5432
 
   generator:
     build: ./generator
-    depends_on:
-      - kafka 
-
-  pyspark_consumer:
-    build: ./pyspark_consumer
-    env_file:
-      - .env
+    container_name: generator_db
     depends_on:
       - kafka
-      - redis
-    volumes:
-      - ./pyspark_consumer:/app
+    environment:
+      KAFKA_BROKERS: kafka:9092
 
-  dashboard:
-    build: ./dashboard
-    env_file:
-      - .env
+  pyspark-consumer-db:
+    build: ./pyspark_consumer
+    container_name: pyspark_consumer_db
+    depends_on:
+      - kafka
+      - db-setup
+    env_file: .env
+    environment:
+      DB_HOST: postgres
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
+      KAFKA_BROKERS: kafka:9092
+
+  dashboard-db:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: dashboard_db
     ports:
       - "8501:8501"
+    env_file: .env
     depends_on:
-      - redis
-    volumes:
-      - ./dashboard:/app
+      - db-setup
+    environment:
+      DB_HOST: postgres
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      DB_NAME: ${POSTGRES_DB}
 
-  redis:
-    image: "redis:alpine"
-    container_name: redis
-    ports:
-      - "6379:6379" 
+volumes:
+  postgres_data: 
